@@ -5,6 +5,10 @@ import {
   deviceInfo,
   readRobotState,
   loadAuth,
+  startCleaning,
+  pauseCleaning,
+  goHome,
+  stopCleaning,
 } from "./dreameClient.js";
 
 function ask(question) {
@@ -36,10 +40,7 @@ async function askHidden(prompt) {
       resolve(value);
     });
 
-    // “hack” simples para não mostrar caracteres
-    rl._writeToOutput = function _writeToOutput() {
-      // não escreve nada
-    };
+    rl._writeToOutput = function _writeToOutput() {};
   });
 }
 
@@ -91,12 +92,54 @@ try {
     tenantId: auth.tenantId,
     deviceDid: dev.did,
   });
+
   console.log("✅ iotstatus/props result:", props);
   console.log("✅ parsed state:", state);
 
-  console.log("✅ OK. Refresh token fica em auth.json (sem senha).");
+  // Contexto necessário para comandos MIoT action
+  const ctx = {
+    accessToken: auth.accessToken,
+    tenantId: auth.tenantId,
+    deviceDid: dev.did,
+    deviceId: info.data.id, // 🔥 cloud device id
+    bindDomain: dev.bindDomain,
+  };
+
+  // =========================
+  // TESTE DE COMANDO (mude aqui conforme quiser)
+  // =========================
+
+  if (state.running) {
+    console.log("⏸️ PAUSE (action) ...");
+    const r = await pauseCleaning(ctx);
+    console.log("✅ pause response:", r);
+  } else if (state.paused) {
+    console.log("▶️ RESUME/START (action) ...");
+    const r = await startCleaning(ctx);
+    console.log("✅ start response:", r);
+  } else if (state.docked) {
+    console.log("▶️ START (action) ...");
+    const r = await startCleaning(ctx);
+    console.log("✅ start response:", r);
+  } else {
+    console.log("🏠 HOME (action) ...");
+    const r = await goHome(ctx);
+    console.log("✅ home response:", r);
+  }
+
+  // Aguarda e lê novamente
+  await new Promise((r) => setTimeout(r, 3000));
+
+  const after = await readRobotState({
+    accessToken: auth.accessToken,
+    tenantId: auth.tenantId,
+    deviceDid: dev.did,
+  });
+
+  console.log("🔄 state after command:", after.state);
+  console.log("✅ OK.");
 } catch (err) {
   console.error("❌ FAIL");
-  console.error(err?.message ?? err);
+  console.error(err);
   process.exit(1);
 }
