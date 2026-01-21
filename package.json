@@ -3,9 +3,16 @@
   "version": "0.0.0",
   "description": "",
   "main": "src/index.js",
+  "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "status": "node src/index.js status",
+    "start:clean": "node src/index.js start",
+    "pause": "node src/index.js pause",
+    "resume": "node src/index.js resume",
+    "stop": "node src/index.js stop",
+    "home": "node src/index.js home",
+    "watch": "node src/index.js watch"
   },
   "repository": {
     "type": "git",

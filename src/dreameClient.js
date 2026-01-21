@@ -24,7 +24,7 @@ const __dirname = path.dirname(__filename);
 const AUTH_PATH = path.join(__dirname, "auth.json");
 
 /**
- * Região Dreame (para sua conta funcionou "us")
+ * Região Dreame
  */
 const REGION = "us";
 
@@ -67,18 +67,15 @@ function buildHeadersJson(s, { accessToken, tenantId }) {
 }
 
 /**
- * Chama /dreame-auth/oauth/token com:
- * - refresh token, ou
- * - username/password (md5 + salt)
+ * /dreame-auth/oauth/token via refresh token ou user/pass
  */
 async function tokenRequest({ refreshToken, username, password }) {
   const s = decodeStrings();
   const baseUrl = `https://${REGION}${s[0]}:${s[1]}`;
-  const url = baseUrl + s[17]; // /dreame-auth/oauth/token
+  const url = baseUrl + s[17];
 
   let body;
   if (refreshToken) {
-    // refresh_token&refresh_token=
     body = `${s[12]}${s[13]}${encodeURIComponent(refreshToken)}`;
   } else {
     if (!username || !password)
@@ -94,9 +91,9 @@ async function tokenRequest({ refreshToken, username, password }) {
 
   const headers = {
     "Content-Type": "application/x-www-form-urlencoded",
-    [s[47]]: s[3], // User-Agent
-    [s[49]]: s[5], // Authorization (Basic ...)
-    [s[50]]: s[6], // Tenant-Id default
+    [s[47]]: s[3],
+    [s[49]]: s[5],
+    [s[50]]: s[6],
   };
   if (REGION === "cn") headers[s[48]] = s[4];
 
@@ -126,7 +123,6 @@ async function tokenRequest({ refreshToken, username, password }) {
 export async function loginDreame({ username, password } = {}) {
   const stored = loadAuth();
 
-  // 1) tenta refresh token
   if (stored?.refreshToken) {
     try {
       const auth = await tokenRequest({ refreshToken: stored.refreshToken });
@@ -142,7 +138,6 @@ export async function loginDreame({ username, password } = {}) {
     }
   }
 
-  // 2) fallback user/pass
   if (!username || !password) {
     throw new Error(
       "No refresh token available; username/password required once.",
@@ -160,14 +155,14 @@ export async function loginDreame({ username, password } = {}) {
 }
 
 /**
- * Listar devices (para pegar did e bindDomain)
+ * List devices
  */
 export async function listDevices({ accessToken, tenantId }) {
   const s = decodeStrings();
   const baseUrl = `https://${REGION}${s[0]}:${s[1]}`;
   const headers = buildHeadersJson(s, { accessToken, tenantId });
 
-  const path = `${s[23]}/${s[24]}/${s[27]}/${s[28]}`; // .../device/listV2
+  const path = `${s[23]}/${s[24]}/${s[27]}/${s[28]}`;
   const url = `${baseUrl}/${path}`;
 
   const res = await fetch(url, { method: "POST", headers });
@@ -184,14 +179,14 @@ export async function listDevices({ accessToken, tenantId }) {
 }
 
 /**
- * device/info (necessário para obter o cloud deviceId -> info.data.id)
+ * device/info -> necessário para cloud deviceId (info.data.id)
  */
 export async function deviceInfo({ accessToken, tenantId, did }) {
   const s = decodeStrings();
   const baseUrl = `https://${REGION}${s[0]}:${s[1]}`;
   const headers = buildHeadersJson(s, { accessToken, tenantId });
 
-  const path = `${s[23]}/${s[24]}/${s[27]}/${s[29]}`; // .../device/info
+  const path = `${s[23]}/${s[24]}/${s[27]}/${s[29]}`;
   const url = `${baseUrl}/${path}`;
 
   const res = await fetch(url, {
@@ -213,8 +208,7 @@ export async function deviceInfo({ accessToken, tenantId, did }) {
 }
 
 /**
- * iotstatus/props
- * keys deve ser CSV: "2.1,2.2,3.1,3.2,4.1"
+ * iotstatus/props (CSV keys)
  */
 export async function getPropsCloud({
   accessToken,
@@ -226,11 +220,12 @@ export async function getPropsCloud({
   const baseUrl = `https://${REGION}${s[0]}:${s[1]}`;
   const headers = buildHeadersJson(s, { accessToken, tenantId });
 
-  const path = `${s[23]}/${s[25]}/${s[41]}`; // .../iotstatus/props
+  const path = `${s[23]}/${s[25]}/${s[41]}`;
   const url = `${baseUrl}/${path}`;
 
   const bodyObj = { did: String(deviceDid), keys };
-  console.log("DEBUG getPropsCloud json:", JSON.stringify(bodyObj));
+  // Se quiser reduzir log, comente a linha abaixo
+  // console.log("DEBUG getPropsCloud json:", JSON.stringify(bodyObj));
 
   const res = await fetch(url, {
     method: "POST",
@@ -251,10 +246,7 @@ export async function getPropsCloud({
 }
 
 /**
- * Parser com regras confirmadas pelos seus snapshots (r2423):
- * - docked/charging: chargingRaw == 1 (e fallback state=13/status=14)
- * - running: stateRaw == 1
- * - paused:  stateRaw == 3
+ * Parser (confirmado r2423)
  */
 export function parsePropsToState(props) {
   const map = Object.fromEntries(props.map((p) => [p.key, p.value]));
@@ -281,9 +273,6 @@ export function parsePropsToState(props) {
   };
 }
 
-/**
- * Lê estado via iotstatus/props
- */
 export async function readRobotState({ accessToken, tenantId, deviceDid }) {
   const keys = "2.1,2.2,3.1,3.2,4.1";
   const props = await getPropsCloud({ accessToken, tenantId, deviceDid, keys });
@@ -291,22 +280,19 @@ export async function readRobotState({ accessToken, tenantId, deviceDid }) {
 }
 
 /**
- * Envia MIoT Action via cloud, replicando o comportamento do Python.
- *
- * CRÍTICO:
- * - params.did = deviceId (cloud id do device/info.data.id), NÃO é o deviceDid (2015...)
- * - payload "envelopado" dentro de data.method="action"
+ * MIoT Action via cloud.
+ * Importante: params.did = cloud deviceId (device/info.data.id)
  */
 export async function callActionCloud({
   accessToken,
   tenantId,
-  deviceDid, // ex: "2015119151"
-  deviceId, // ex: "1994858719174369281" (info.data.id)
-  bindDomain, // ex: "10000.mt.us.iot.dreame.tech:19973"
+  deviceDid,
+  deviceId,
+  bindDomain,
   siid,
   aiid,
   inParams = [],
-  timeoutMs = 8000,
+  timeoutMs = 12000,
 }) {
   const s = decodeStrings();
 
@@ -314,10 +300,9 @@ export async function callActionCloud({
   const hostSuffix = hostPrefix ? `-${hostPrefix}` : "";
 
   const baseUrl = `https://${REGION}${s[0]}:${s[1]}`;
-  const url = `${baseUrl}/${s[37]}${hostSuffix}/${s[27]}/${s[38]}`; // /dreame-iot-com-10000/device/sendCommand
+  const url = `${baseUrl}/${s[37]}${hostSuffix}/${s[27]}/${s[38]}`;
 
   const headers = buildHeadersJson(s, { accessToken, tenantId });
-
   const id = Math.floor(Math.random() * 1e9);
 
   const payload = {
@@ -328,7 +313,7 @@ export async function callActionCloud({
       id,
       method: "action",
       params: {
-        did: String(deviceId), // 🔥 cloud id
+        did: String(deviceId),
         siid,
         aiid,
         in: inParams,
@@ -351,34 +336,103 @@ export async function callActionCloud({
     });
 
     const text = await res.text();
-    if (!res.ok) throw new Error(`callActionCloud HTTP ${res.status}: ${text}`);
-
+    if (!res.ok)
+      return { code: `HTTP_${res.status}`, success: false, raw: text };
     return JSON.parse(text);
+  } catch (e) {
+    return { code: "TIMEOUT", success: false, error: String(e?.message ?? e) };
   } finally {
     clearTimeout(t);
   }
 }
 
 /**
+ * Envia action e confirma por estado (robusto contra 80001).
+ */
+export async function actionAndConfirm({
+  accessToken,
+  tenantId,
+  deviceDid,
+  deviceId,
+  bindDomain,
+  siid,
+  aiid,
+  inParams = [],
+  expect, // (state) => boolean
+  attempts = 6,
+  delayMs = 1500,
+  onPoll, // (i, state) => void
+}) {
+  const resp = await callActionCloud({
+    accessToken,
+    tenantId,
+    deviceDid,
+    deviceId,
+    bindDomain,
+    siid,
+    aiid,
+    inParams,
+  });
+
+  for (let i = 1; i <= attempts; i++) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    const { state } = await readRobotState({
+      accessToken,
+      tenantId,
+      deviceDid,
+    });
+    if (onPoll) onPoll(i, state);
+    if (expect(state)) return { ok: true, resp, state };
+  }
+
+  const after = await readRobotState({ accessToken, tenantId, deviceDid });
+  return { ok: false, resp, state: after.state };
+}
+
+/**
  * Helpers de comando (mínimo essencial)
- * Tabela (confirmada no dreame-vacuum):
- * - START/RESUME: siid=2 aiid=1
- * - PAUSE:        siid=2 aiid=2
- * - HOME/CHARGE:  siid=3 aiid=1
- * - STOP:         siid=4 aiid=2
  */
 export async function startCleaning(ctx) {
-  return callActionCloud({ ...ctx, siid: 2, aiid: 1 });
+  return actionAndConfirm({
+    ...ctx,
+    siid: 2,
+    aiid: 1,
+    expect: (s) => s.running === true,
+  });
 }
 
 export async function pauseCleaning(ctx) {
-  return callActionCloud({ ...ctx, siid: 2, aiid: 2 });
-}
-
-export async function goHome(ctx) {
-  return callActionCloud({ ...ctx, siid: 3, aiid: 1 });
+  return actionAndConfirm({
+    ...ctx,
+    siid: 2,
+    aiid: 2,
+    expect: (s) => s.paused === true,
+  });
 }
 
 export async function stopCleaning(ctx) {
-  return callActionCloud({ ...ctx, siid: 4, aiid: 2 });
+  return actionAndConfirm({
+    ...ctx,
+    siid: 4,
+    aiid: 2,
+    // parar pode cair em idle/standby; aqui é mínimo
+    expect: (s) => s.running === false && s.paused === false,
+    attempts: 10,
+    delayMs: 1500,
+  });
+}
+
+export async function goHome(ctx) {
+  // “Home” pode levar bastante tempo; confirma docked
+  return actionAndConfirm({
+    ...ctx,
+    siid: 3,
+    aiid: 1,
+    expect: (s) => s.docked === true,
+    attempts: 45, // ~90s (45 * 2s)
+    delayMs: 2000,
+    onPoll: (i, s) => {
+      console.log(`… aguardando dock (${i}/45) raw=`, s.raw);
+    },
+  });
 }

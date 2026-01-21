@@ -1,15 +1,6 @@
 import readline from "node:readline";
-import {
-  loginDreame,
-  listDevices,
-  deviceInfo,
-  readRobotState,
-  loadAuth,
-  startCleaning,
-  pauseCleaning,
-  goHome,
-  stopCleaning,
-} from "./dreameClient.js";
+import { loadAuth } from "./dreameClient.js";
+import { DreameController } from "./dreameController.js";
 
 function ask(question) {
   const rl = readline.createInterface({
@@ -24,7 +15,6 @@ function ask(question) {
   );
 }
 
-// senha sem ecoar no terminal
 async function askHidden(prompt) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({
@@ -32,112 +22,113 @@ async function askHidden(prompt) {
       output: process.stdout,
       terminal: true,
     });
-
     rl.question(prompt, (value) => {
       rl.history = rl.history.slice(1);
       rl.close();
       console.log();
       resolve(value);
     });
-
     rl._writeToOutput = function _writeToOutput() {};
   });
 }
 
+function usage() {
+  console.log(`
+Uso:
+  node src/index.js status
+  node src/index.js start
+  node src/index.js pause
+  node src/index.js resume
+  node src/index.js stop
+  node src/index.js home
+  node src/index.js watch
+
+Dica:
+  - A primeira vez pede username/senha (uma vez) e salva refreshToken em auth.json.
+`);
+}
+
+const cmd = (process.argv[2] ?? "status").toLowerCase();
+
 try {
+  if (cmd === "help" || cmd === "-h" || cmd === "--help") {
+    usage();
+    process.exit(0);
+  }
+
   const stored = loadAuth();
-  let auth;
+  let username;
+  let password;
 
   if (stored?.refreshToken) {
     console.log("ℹ️ auth.json encontrado (vou usar refresh token).");
-    auth = await loginDreame();
   } else {
     console.log(
       "ℹ️ Primeira execução: preciso de username/senha uma única vez.",
     );
-    const username = await ask("Username (email): ");
-    const password = await askHidden("Password: ");
-    auth = await loginDreame({ username, password });
+    username = await ask("Username (email): ");
+    password = await askHidden("Password: ");
   }
 
-  console.log("✅ LOGIN OK", {
-    tenantId: auth.tenantId,
-    baseUrl: auth.baseUrl,
-  });
+  const ctrl = new DreameController();
+  const initInfo = await ctrl.init({ username, password });
 
-  const devices = await listDevices({
-    accessToken: auth.accessToken,
-    tenantId: auth.tenantId,
-  });
-  const records = devices?.page?.records ?? devices?.records ?? [];
-  if (!records.length) throw new Error("Nenhum device encontrado");
+  console.log("✅ INIT OK", initInfo);
 
-  const dev = records[0];
-  console.log("✅ DEVICE", {
-    did: String(dev.did),
-    model: dev.model,
-    bindDomain: dev.bindDomain,
-  });
-
-  const info = await deviceInfo({
-    accessToken: auth.accessToken,
-    tenantId: auth.tenantId,
-    did: dev.did,
-  });
-  console.log("ℹ️ device/info.online:", info.data?.online);
-  console.log("ℹ️ device/info.latestStatus:", info.data?.latestStatus);
-
-  const { props, state } = await readRobotState({
-    accessToken: auth.accessToken,
-    tenantId: auth.tenantId,
-    deviceDid: dev.did,
-  });
-
-  console.log("✅ iotstatus/props result:", props);
-  console.log("✅ parsed state:", state);
-
-  // Contexto necessário para comandos MIoT action
-  const ctx = {
-    accessToken: auth.accessToken,
-    tenantId: auth.tenantId,
-    deviceDid: dev.did,
-    deviceId: info.data.id, // 🔥 cloud device id
-    bindDomain: dev.bindDomain,
-  };
-
-  // =========================
-  // TESTE DE COMANDO (mude aqui conforme quiser)
-  // =========================
-
-  if (state.running) {
-    console.log("⏸️ PAUSE (action) ...");
-    const r = await pauseCleaning(ctx);
-    console.log("✅ pause response:", r);
-  } else if (state.paused) {
-    console.log("▶️ RESUME/START (action) ...");
-    const r = await startCleaning(ctx);
-    console.log("✅ start response:", r);
-  } else if (state.docked) {
-    console.log("▶️ START (action) ...");
-    const r = await startCleaning(ctx);
-    console.log("✅ start response:", r);
-  } else {
-    console.log("🏠 HOME (action) ...");
-    const r = await goHome(ctx);
-    console.log("✅ home response:", r);
+  if (cmd === "status") {
+    const { state } = await ctrl.status();
+    console.log("✅ state:", state);
+    process.exit(0);
   }
 
-  // Aguarda e lê novamente
-  await new Promise((r) => setTimeout(r, 3000));
+  if (cmd === "watch") {
+    console.log("👀 watch: mostrando estado a cada 2s (Ctrl+C para sair)");
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { state } = await ctrl.status();
+      console.log(new Date().toISOString(), state);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
 
-  const after = await readRobotState({
-    accessToken: auth.accessToken,
-    tenantId: auth.tenantId,
-    deviceDid: dev.did,
-  });
+  if (cmd === "start") {
+    console.log("▶️ START ...");
+    const r = await ctrl.start();
+    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
+    process.exit(r.ok ? 0 : 2);
+  }
 
-  console.log("🔄 state after command:", after.state);
-  console.log("✅ OK.");
+  if (cmd === "pause") {
+    console.log("⏸️ PAUSE ...");
+    const r = await ctrl.pause();
+    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
+    process.exit(r.ok ? 0 : 2);
+  }
+
+  if (cmd === "resume") {
+    console.log("▶️ RESUME ...");
+    const r = await ctrl.resume();
+    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
+    process.exit(r.ok ? 0 : 2);
+  }
+
+  if (cmd === "stop") {
+    console.log("⏹️ STOP ...");
+    const r = await ctrl.stop();
+    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
+    process.exit(r.ok ? 0 : 2);
+  }
+
+  if (cmd === "home") {
+    console.log("🏠 HOME ...");
+    const r = await ctrl.home();
+    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
+    process.exit(r.ok ? 0 : 2);
+  }
+
+  console.log(`Comando desconhecido: ${cmd}`);
+  usage();
+  process.exit(1);
 } catch (err) {
   console.error("❌ FAIL");
   console.error(err);
