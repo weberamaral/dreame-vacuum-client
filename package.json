@@ -17,5 +17,8 @@
   "bugs": {
     "url": "https://github.com/weberamaral/dreame-vacuum-client/issues"
   },
-  "homepage": "https://github.com/weberamaral/dreame-vacuum-client#readme"
+  "homepage": "https://github.com/weberamaral/dreame-vacuum-client#readme",
+  "dependencies": {
+    "node-ansi-logger": "^3.1.1"
+  }
 }
