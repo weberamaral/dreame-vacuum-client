@@ -1,6 +1,17 @@
 import readline from "node:readline";
-import { loadAuth } from "./dreameClient.js";
-import { DreameController } from "./dreameController.js";
+import {
+  loadAuth,
+  loginDreame,
+  listDevices,
+  deviceInfo,
+  readRobotState,
+  syncRoomsFromRism,
+  loadRoomsCache,
+  startSegmentCleaning,
+  startCleaning,
+  pauseCleaning,
+  goHome,
+} from "./dreameClient.js";
 
 function ask(question) {
   const rl = readline.createInterface({
@@ -32,30 +43,20 @@ async function askHidden(prompt) {
   });
 }
 
-function usage() {
-  console.log(`
-Uso:
-  node src/index.js status
-  node src/index.js start
-  node src/index.js pause
-  node src/index.js resume
-  node src/index.js stop
-  node src/index.js home
-  node src/index.js watch
-
-Dica:
-  - A primeira vez pede username/senha (uma vez) e salva refreshToken em auth.json.
-`);
+function parseCsvInts(s) {
+  if (!s) return [];
+  return String(s)
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map(Number)
+    .filter((n) => Number.isFinite(n));
 }
 
 const cmd = (process.argv[2] ?? "status").toLowerCase();
+const arg1 = process.argv[3] ?? "";
 
 try {
-  if (cmd === "help" || cmd === "-h" || cmd === "--help") {
-    usage();
-    process.exit(0);
-  }
-
   const stored = loadAuth();
   let username;
   let password;
@@ -70,67 +71,175 @@ try {
     password = await askHidden("Password: ");
   }
 
-  const ctrl = new DreameController();
-  const initInfo = await ctrl.init({ username, password });
+  const auth = await loginDreame({ username, password });
+  console.log("✅ LOGIN OK", {
+    tenantId: auth.tenantId,
+    baseUrl: auth.baseUrl,
+  });
 
-  console.log("✅ INIT OK", initInfo);
+  const devs = await listDevices({
+    accessToken: auth.accessToken,
+    tenantId: auth.tenantId,
+  });
+  const records = devs?.page?.records ?? devs?.records ?? [];
+  const device = records[0];
+  if (!device) throw new Error("Nenhum device encontrado");
+
+  const info = await deviceInfo({
+    accessToken: auth.accessToken,
+    tenantId: auth.tenantId,
+    did: device.did,
+  });
+  const model = info?.data?.model ?? device.model;
+  const deviceId = info?.data?.id;
+
+  if (!model) throw new Error("Model não encontrado.");
+  if (!deviceId) throw new Error("deviceId (info.data.id) não encontrado.");
+
+  console.log("✅ DEVICE", {
+    did: device.did,
+    model,
+    bindDomain: device.bindDomain,
+    deviceId,
+    masterUid: info?.data?.masterUid,
+  });
 
   if (cmd === "status") {
-    const { state } = await ctrl.status();
+    const { state } = await readRobotState({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+    });
     console.log("✅ state:", state);
     process.exit(0);
   }
 
-  if (cmd === "watch") {
-    console.log("👀 watch: mostrando estado a cada 2s (Ctrl+C para sair)");
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const { state } = await ctrl.status();
-      console.log(new Date().toISOString(), state);
-      await new Promise((r) => setTimeout(r, 2000));
+  if (cmd === "sync-rooms") {
+    console.log("🗺️ SYNC ROOMS (from rism) ...");
+    const result = syncRoomsFromRism(device.did);
+    console.log(`✅ rooms: ${result.rooms.length}`);
+    console.log(`✅ serviceAreas: ${result.serviceAreas.length}`);
+    console.log("ℹ️ cache:", `src/cache/rooms_from_rism_${device.did}.json`);
+    process.exit(0);
+  }
+
+  if (cmd === "rooms") {
+    const cached = loadRoomsCache(device.did);
+    if (!cached) {
+      console.log("ℹ️ rooms cache não existe ainda. Rode:");
+      console.log("  node src/index.js sync-rooms");
+      process.exit(1);
     }
+    console.log(`✅ rooms (cache): ${cached.rooms?.length ?? 0}`);
+    for (const r of cached.rooms ?? []) {
+      console.log("-", {
+        segmentId: r.segmentId,
+        name: r.name,
+        type: r.type,
+        index: r.index,
+        uniqueId: r.uniqueId,
+      });
+    }
+    console.log(`✅ serviceAreas (cache): ${cached.serviceAreas?.length ?? 0}`);
+    for (const a of cached.serviceAreas ?? []) {
+      console.log("-", { id: a.id, name: a.name, index: a.index });
+    }
+    process.exit(0);
+  }
+
+  if (cmd === "clean-rooms") {
+    const segments = parseCsvInts(arg1);
+    if (!segments.length)
+      throw new Error('Use: node src/index.js clean-rooms "2,7"');
+
+    console.log("🧹 clean-rooms:", segments);
+    const r = await startSegmentCleaning({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+      segments,
+      repeat: 1,
+    });
+
+    console.log("✅ sent selects:", r.selects);
+    console.log("✅ fan/water:", { fan: r.fan, water: r.water });
+    console.log("✅ response:", r.resp);
+
+    const { state } = await readRobotState({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+    });
+    console.log("🔄 state after command:", state);
+    process.exit(0);
   }
 
   if (cmd === "start") {
     console.log("▶️ START ...");
-    const r = await ctrl.start();
-    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
-    process.exit(r.ok ? 0 : 2);
+    const resp = await startCleaning({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+    });
+    console.log("✅ start response:", resp);
+    const { state } = await readRobotState({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+    });
+    console.log("🔄 state after start:", state);
+    process.exit(0);
   }
 
   if (cmd === "pause") {
     console.log("⏸️ PAUSE ...");
-    const r = await ctrl.pause();
-    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
-    process.exit(r.ok ? 0 : 2);
-  }
-
-  if (cmd === "resume") {
-    console.log("▶️ RESUME ...");
-    const r = await ctrl.resume();
-    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
-    process.exit(r.ok ? 0 : 2);
-  }
-
-  if (cmd === "stop") {
-    console.log("⏹️ STOP ...");
-    const r = await ctrl.stop();
-    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
-    process.exit(r.ok ? 0 : 2);
+    const resp = await pauseCleaning({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+    });
+    console.log("✅ pause response:", resp);
+    const { state } = await readRobotState({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+    });
+    console.log("🔄 state after pause:", state);
+    process.exit(0);
   }
 
   if (cmd === "home") {
     console.log("🏠 HOME ...");
-    const r = await ctrl.home();
-    console.log("✅ result:", r.ok, "resp:", r.resp, "state:", r.state);
-    process.exit(r.ok ? 0 : 2);
+    const resp = await goHome({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+    });
+    console.log("✅ home response:", resp);
+    const { state } = await readRobotState({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+    });
+    console.log("🔄 state after home:", state);
+    process.exit(0);
   }
 
-  console.log(`Comando desconhecido: ${cmd}`);
-  usage();
+  console.log("Comando inválido. Use:");
+  console.log("  node src/index.js status");
+  console.log("  node src/index.js sync-rooms");
+  console.log("  node src/index.js rooms");
+  console.log('  node src/index.js clean-rooms "2,7"');
+  console.log("  node src/index.js start");
+  console.log("  node src/index.js pause");
+  console.log("  node src/index.js home");
   process.exit(1);
-} catch (err) {
+} catch (e) {
   console.error("❌ FAIL");
-  console.error(err);
+  console.error(e);
   process.exit(1);
 }

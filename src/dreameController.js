@@ -7,19 +7,17 @@ import {
   pauseCleaning,
   stopCleaning,
   goHome,
+  getRoomsCloud,
+  cleanRooms,
+  debugHistoryTypes,
 } from "./dreameClient.js";
 
-/**
- * Camada fina de controle (ainda “simples”, mas já com cara de lib).
- * Depois é só plugar no Matterbridge.
- */
 export class DreameController {
   constructor({ pickDeviceIndex = 0 } = {}) {
     this.pickDeviceIndex = pickDeviceIndex;
-
     this.auth = null;
-    this.device = null; // { did, bindDomain, model, ... }
-    this.deviceId = null; // cloud id (device/info.data.id)
+    this.device = null;
+    this.deviceId = null;
   }
 
   async init({ username, password } = {}) {
@@ -83,7 +81,6 @@ export class DreameController {
   }
 
   async resume() {
-    // no Dreame cloud, resume == start quando está pausado
     return startCleaning(this.ctx());
   }
 
@@ -93,5 +90,19 @@ export class DreameController {
 
   async home() {
     return goHome(this.ctx());
+  }
+
+  async rooms({ cacheTtlMinutes = 60 } = {}) {
+    const { accessToken, tenantId, deviceDid } = this.ctx();
+    return getRoomsCloud({ accessToken, tenantId, deviceDid, cacheTtlMinutes });
+  }
+
+  async cleanRooms(segmentIds, options = {}) {
+    return cleanRooms(this.ctx(), segmentIds, options);
+  }
+
+  async debugKeys(types) {
+    const { accessToken, tenantId, deviceDid } = this.ctx();
+    return debugHistoryTypes({ accessToken, tenantId, deviceDid, types });
   }
 }
