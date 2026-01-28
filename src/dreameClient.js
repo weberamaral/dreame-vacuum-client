@@ -245,7 +245,34 @@ export async function readRobotState({ accessToken, tenantId, deviceDid }) {
 }
 
 /* ============================================================
- * ROOMS via RISM (Service Area ready)
+ * PRESETS (Matter-friendly)
+ * ============================================================ */
+
+export const CLEAN_PRESETS = {
+  VacuumSilent: { fan: 0, water: null },
+  VacuumNormal: { fan: 1, water: null },
+  VacuumTurbo: { fan: 2, water: null },
+  VacuumMax: { fan: 3, water: null },
+
+  MopLow: { fan: 0, water: 1 },
+  MopMedium: { fan: 0, water: 2 },
+  MopHigh: { fan: 0, water: 3 },
+
+  VacuumAndMopLow: { fan: 1, water: 1 },
+  VacuumAndMopMedium: { fan: 1, water: 2 },
+  VacuumAndMopHigh: { fan: 1, water: 3 },
+};
+
+export function listPresets() {
+  return Object.entries(CLEAN_PRESETS).map(([name, v]) => ({
+    name,
+    fan: v.fan,
+    water: v.water,
+  }));
+}
+
+/* ============================================================
+ * ROOMS via RISM
  * ============================================================ */
 
 function zlibDecompressBestEffort(buf) {
@@ -381,10 +408,6 @@ export function extractRoomsFromSegInf(segInfObj) {
   return out;
 }
 
-/**
- * Lê map_data_<did>.json (gerado por você antes) e extrai rooms.
- * Mantém cache em rooms_from_rism_<did>.json.
- */
 export function syncRoomsFromRism(deviceDid) {
   const mapData = loadJsonCache(`map_data_${deviceDid}.json`);
   if (!mapData?.dataJson) {
@@ -404,11 +427,9 @@ export function syncRoomsFromRism(deviceDid) {
   const segInf = parsed.dataJson?.seg_inf ?? parsed.dataJson?.segInf ?? null;
   const rooms = extractRoomsFromSegInf(segInf);
 
-  // Formato “Service Area ready”
   const serviceAreas = rooms.map((r) => ({
-    id: r.segmentId, // ✅ ID estável (Matter ServiceArea ID)
-    name: r.name ?? `Room ${r.segmentId}`, // label
-    // extras úteis (não obrigatórios no Matter):
+    id: r.segmentId,
+    name: r.name ?? `Room ${r.segmentId}`,
     index: r.index ?? null,
     type: r.type ?? null,
     uniqueId: r.uniqueId ?? null,
@@ -433,7 +454,73 @@ export function loadRoomsCache(deviceDid) {
 }
 
 /* ============================================================
- * ACTION (envelope igual ao Python)
+ * Matching helpers (for clean-only / clean-except)
+ * ============================================================ */
+
+/**
+ * Normaliza textos pra comparar:
+ * - lower
+ * - remove acentos
+ * - remove pontuação/espacos extras
+ */
+export function normalizeName(s) {
+  return String(s ?? "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // remove diacritics
+    .replace(/[_\-]+/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Constrói um índice { normalizedName -> room }.
+ * Se houver nomes duplicados, mantém o primeiro (raríssimo).
+ */
+export function buildRoomIndexFromCache(deviceDid) {
+  const cached = loadRoomsCache(deviceDid);
+  if (!cached?.rooms?.length) {
+    throw new Error(`Rooms cache vazio. Rode: node src/index.js sync-rooms`);
+  }
+  const idx = new Map();
+  for (const r of cached.rooms) {
+    const key = normalizeName(r.name ?? "");
+    if (!key) continue;
+    if (!idx.has(key)) idx.set(key, r);
+  }
+  return { cached, index: idx };
+}
+
+/**
+ * Resolve uma lista de nomes para segmentIds.
+ * Retorna { ids, missing }.
+ */
+export function resolveRoomNamesToIds(deviceDid, names) {
+  const { cached, index } = buildRoomIndexFromCache(deviceDid);
+
+  const ids = [];
+  const missing = [];
+
+  for (const name of names) {
+    const key = normalizeName(name);
+    const r = index.get(key);
+    if (!r) {
+      missing.push(name);
+      continue;
+    }
+    ids.push(r.segmentId);
+  }
+
+  // dedupe
+  const uniqueIds = [...new Set(ids)].sort((a, b) => a - b);
+
+  return { ids: uniqueIds, missing, cached };
+}
+
+/* ============================================================
+ * DEVICE sendCommand
  * ============================================================ */
 
 function randomId() {
@@ -500,6 +587,103 @@ export async function callAction({
   });
 }
 
+export async function setProperties({
+  accessToken,
+  tenantId,
+  deviceDid,
+  deviceId,
+  properties,
+}) {
+  const id = randomId();
+  const params = (properties ?? []).map((p) => ({
+    did: String(deviceId),
+    siid: Number(p.siid),
+    piid: Number(p.piid),
+    value: p.value,
+  }));
+
+  return postDeviceSendCommand({
+    accessToken,
+    tenantId,
+    deviceDid,
+    innerMethod: "set_properties",
+    innerParams: params,
+    id,
+  });
+}
+
+function clamp(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  return Math.max(min, Math.min(max, x));
+}
+
+export async function setFanSpeed({
+  accessToken,
+  tenantId,
+  deviceDid,
+  deviceId,
+  fan,
+}) {
+  const v = clamp(fan, 0, 3);
+  return setProperties({
+    accessToken,
+    tenantId,
+    deviceDid,
+    deviceId,
+    properties: [{ siid: 4, piid: 4, value: v }],
+  });
+}
+
+export async function setWaterLevel({
+  accessToken,
+  tenantId,
+  deviceDid,
+  deviceId,
+  water,
+}) {
+  const v = clamp(water, 0, 3);
+  return setProperties({
+    accessToken,
+    tenantId,
+    deviceDid,
+    deviceId,
+    properties: [{ siid: 4, piid: 5, value: v }],
+  });
+}
+
+export async function applyPreset({
+  accessToken,
+  tenantId,
+  deviceDid,
+  deviceId,
+  presetName,
+}) {
+  const preset = CLEAN_PRESETS[presetName];
+  if (!preset) throw new Error(`Preset inválido: ${presetName}`);
+
+  const fanResp = await setFanSpeed({
+    accessToken,
+    tenantId,
+    deviceDid,
+    deviceId,
+    fan: preset.fan,
+  });
+
+  let waterResp = null;
+  if (preset.water !== null && preset.water !== undefined) {
+    waterResp = await setWaterLevel({
+      accessToken,
+      tenantId,
+      deviceDid,
+      deviceId,
+      water: preset.water,
+    });
+  }
+
+  return { fanResp, waterResp };
+}
+
 export async function startCleaning({
   accessToken,
   tenantId,
@@ -544,10 +728,6 @@ export async function goHome({ accessToken, tenantId, deviceDid, deviceId }) {
   });
 }
 
-/**
- * SEGMENT CLEANING (START_CUSTOM)
- * status=18 ; piid1=status ; piid10=cleaning_properties(JSON string)
- */
 export async function startSegmentCleaning({
   accessToken,
   tenantId,
@@ -568,8 +748,8 @@ export async function startSegmentCleaning({
   const map = Object.fromEntries(props.map((p) => [p.key, p.value]));
   const fan = Number(map["4.4"]);
   const water = Number(map["4.5"]);
-  const fanSafe = Number.isFinite(fan) ? fan : 2;
-  const waterSafe = Number.isFinite(water) ? water : 2;
+  const fanSafe = Number.isFinite(fan) ? fan : 1;
+  const waterSafe = Number.isFinite(water) ? water : 0;
 
   const selects = segments.map((segId) => [
     Number(segId),

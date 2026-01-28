@@ -11,6 +11,13 @@ import {
   startCleaning,
   pauseCleaning,
   goHome,
+  listPresets,
+  applyPreset,
+  setFanSpeed,
+  setWaterLevel,
+  getPropsCloud,
+  normalizeName,
+  resolveRoomNamesToIds,
 } from "./dreameClient.js";
 
 function ask(question) {
@@ -51,6 +58,19 @@ function parseCsvInts(s) {
     .filter(Boolean)
     .map(Number)
     .filter((n) => Number.isFinite(n));
+}
+
+function parseNamesList(s) {
+  // aceita: "Banheiro,Suíte" ou "Banheiro;Suíte" ou "Banheiro|Suíte"
+  if (!s) return [];
+  return String(s)
+    .split(/[;,|]/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function uniqueSorted(nums) {
+  return [...new Set(nums)].sort((a, b) => a - b);
 }
 
 const cmd = (process.argv[2] ?? "status").toLowerCase();
@@ -140,10 +160,6 @@ try {
         uniqueId: r.uniqueId,
       });
     }
-    console.log(`✅ serviceAreas (cache): ${cached.serviceAreas?.length ?? 0}`);
-    for (const a of cached.serviceAreas ?? []) {
-      console.log("-", { id: a.id, name: a.name, index: a.index });
-    }
     process.exit(0);
   }
 
@@ -163,7 +179,7 @@ try {
     });
 
     console.log("✅ sent selects:", r.selects);
-    console.log("✅ fan/water:", { fan: r.fan, water: r.water });
+    console.log("✅ fan/water used:", { fan: r.fan, water: r.water });
     console.log("✅ response:", r.resp);
 
     const { state } = await readRobotState({
@@ -172,6 +188,85 @@ try {
       deviceDid: device.did,
     });
     console.log("🔄 state after command:", state);
+    process.exit(0);
+  }
+
+  // ✅ NOVO: clean-only por nomes
+  if (cmd === "clean-only") {
+    const names = parseNamesList(arg1);
+    if (!names.length)
+      throw new Error('Use: node src/index.js clean-only "Sala,Cozinha"');
+
+    const { ids, missing, cached } = resolveRoomNamesToIds(device.did, names);
+    if (missing.length) {
+      console.log("❌ Rooms não encontradas:", missing);
+      console.log(
+        "ℹ️ Dica: veja rooms disponíveis com: node src/index.js rooms",
+      );
+      process.exit(1);
+    }
+
+    console.log("🧹 clean-only names:", names);
+    console.log("✅ resolved segmentIds:", ids);
+
+    const r = await startSegmentCleaning({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+      segments: ids,
+      repeat: 1,
+    });
+
+    console.log("✅ response:", r.resp);
+    process.exit(0);
+  }
+
+  // ✅ NOVO: clean-except por nomes (seu caso ST)
+  if (cmd === "clean-except") {
+    const names = parseNamesList(arg1);
+    if (!names.length)
+      throw new Error('Use: node src/index.js clean-except "Banheiro,Suíte"');
+
+    const cached = loadRoomsCache(device.did);
+    if (!cached?.rooms?.length) {
+      console.log("❌ Rooms cache vazio. Rode primeiro:");
+      console.log("  node src/index.js sync-rooms");
+      process.exit(1);
+    }
+
+    // resolve os excluídos
+    const { ids: excludeIds, missing } = resolveRoomNamesToIds(
+      device.did,
+      names,
+    );
+    if (missing.length) {
+      console.log("❌ Rooms não encontradas:", missing);
+      console.log(
+        "ℹ️ Dica: veja rooms disponíveis com: node src/index.js rooms",
+      );
+      process.exit(1);
+    }
+
+    const allIds = cached.rooms.map((r) => r.segmentId);
+    const includeIds = uniqueSorted(
+      allIds.filter((id) => !excludeIds.includes(id)),
+    );
+
+    console.log("🧹 clean-except names:", names);
+    console.log("✅ excludeIds:", excludeIds);
+    console.log("✅ includeIds:", includeIds);
+
+    const r = await startSegmentCleaning({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+      segments: includeIds,
+      repeat: 1,
+    });
+
+    console.log("✅ response:", r.resp);
     process.exit(0);
   }
 
@@ -184,12 +279,6 @@ try {
       deviceId,
     });
     console.log("✅ start response:", resp);
-    const { state } = await readRobotState({
-      accessToken: auth.accessToken,
-      tenantId: auth.tenantId,
-      deviceDid: device.did,
-    });
-    console.log("🔄 state after start:", state);
     process.exit(0);
   }
 
@@ -202,12 +291,6 @@ try {
       deviceId,
     });
     console.log("✅ pause response:", resp);
-    const { state } = await readRobotState({
-      accessToken: auth.accessToken,
-      tenantId: auth.tenantId,
-      deviceDid: device.did,
-    });
-    console.log("🔄 state after pause:", state);
     process.exit(0);
   }
 
@@ -220,12 +303,91 @@ try {
       deviceId,
     });
     console.log("✅ home response:", resp);
-    const { state } = await readRobotState({
+    process.exit(0);
+  }
+
+  if (cmd === "presets") {
+    console.log("🎛️ PRESETS (Matter-friendly) ...");
+    for (const p of listPresets()) console.log("-", p);
+    process.exit(0);
+  }
+
+  if (cmd === "preset") {
+    if (!arg1) throw new Error("Use: node src/index.js preset VacuumTurbo");
+    console.log(`🎛️ APPLY PRESET: ${arg1} ...`);
+    const resp = await applyPreset({
       accessToken: auth.accessToken,
       tenantId: auth.tenantId,
       deviceDid: device.did,
+      deviceId,
+      presetName: arg1,
     });
-    console.log("🔄 state after home:", state);
+    console.log("✅ preset responses:", resp);
+
+    const props = await getPropsCloud({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      keys: "4.4,4.5",
+    });
+    console.log(
+      "🔄 current fan/water:",
+      Object.fromEntries(props.map((p) => [p.key, p.value])),
+    );
+    process.exit(0);
+  }
+
+  if (cmd === "set-fan") {
+    const fan = Number(arg1);
+    if (!Number.isFinite(fan))
+      throw new Error("Use: node src/index.js set-fan 0..3");
+    console.log(`🌀 set-fan ${fan} ...`);
+    const resp = await setFanSpeed({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+      fan,
+    });
+    console.log("✅ set-fan response:", resp);
+
+    const props = await getPropsCloud({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      keys: "4.4,4.5",
+    });
+    console.log(
+      "🔄 current fan/water:",
+      Object.fromEntries(props.map((p) => [p.key, p.value])),
+    );
+    process.exit(0);
+  }
+
+  if (cmd === "set-water") {
+    const water = Number(arg1);
+    if (!Number.isFinite(water))
+      throw new Error("Use: node src/index.js set-water 0..3");
+    console.log(`💧 set-water ${water} ...`);
+    const resp = await setWaterLevel({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      deviceId,
+      water,
+    });
+    console.log("✅ set-water response:", resp);
+
+    const props = await getPropsCloud({
+      accessToken: auth.accessToken,
+      tenantId: auth.tenantId,
+      deviceDid: device.did,
+      keys: "4.4,4.5",
+    });
+    console.log(
+      "🔄 current fan/water:",
+      Object.fromEntries(props.map((p) => [p.key, p.value])),
+    );
     process.exit(0);
   }
 
@@ -234,9 +396,15 @@ try {
   console.log("  node src/index.js sync-rooms");
   console.log("  node src/index.js rooms");
   console.log('  node src/index.js clean-rooms "2,7"');
+  console.log('  node src/index.js clean-only "Sala,Cozinha"');
+  console.log('  node src/index.js clean-except "Banheiro,Suíte"');
   console.log("  node src/index.js start");
   console.log("  node src/index.js pause");
   console.log("  node src/index.js home");
+  console.log("  node src/index.js presets");
+  console.log("  node src/index.js preset VacuumTurbo");
+  console.log("  node src/index.js set-fan 0..3");
+  console.log("  node src/index.js set-water 0..3");
   process.exit(1);
 } catch (e) {
   console.error("❌ FAIL");
